@@ -6,7 +6,7 @@
   <title>GitStellar - Random GitHub Repos (100+ Stele)</title>
   
   <!-- SEO & PWA Meta -->
-  <meta name="description" content="Descoperă repozitorii GitHub populare și fascinante cu cel puțin 100 de stele, direct într-o aplicație web PWA ultra-rapidă.">
+  <meta name="description" content="Descoperă repozitorii GitHub populare cu AI Summary, README Viewer și GitHub Star direct.">
   <meta name="theme-color" content="#4f46e5">
   <link rel="manifest" href="manifest.json">
   <link rel="icon" type="image/svg+xml" href="icon.svg">
@@ -15,7 +15,10 @@
   <!-- Google Fonts -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+
+  <!-- Marked.js for README Markdown Rendering -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 
   <!-- Custom CSS System -->
   <link rel="stylesheet" href="styles.css">
@@ -34,6 +37,20 @@
       </a>
 
       <div class="header-actions">
+        <!-- Connected GitHub User Profile Badge -->
+        <div id="githubUserBadge" class="user-badge" style="display: none;" title="Cont GitHub Conectat">
+          <img id="ghUserAvatar" src="" alt="User Avatar" class="user-badge-avatar">
+          <span id="ghUserLogin" class="user-badge-name">@user</span>
+        </div>
+
+        <button id="openSettingsBtn" class="btn-icon-secondary" title="Setări GitHub Token & Gemini AI">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3"></circle>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+          </svg>
+          Setări
+        </button>
+
         <button id="installPwaBtn" class="btn-icon-secondary install-pwa-btn" title="Instalează aplicația PWA">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
@@ -144,12 +161,90 @@
     </div>
   </div>
 
+  <!-- Settings Modal (GitHub Token & Gemini Key) -->
+  <div id="settingsModalOverlay" class="modal-overlay center-modal">
+    <div class="modal-card">
+      <div class="drawer-header">
+        <h2 class="drawer-title">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3"></circle>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+          </svg>
+          Setări Aplicație
+        </h2>
+        <button id="closeSettingsBtn" class="btn-close" aria-label="Închide setări">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+      </div>
+
+      <div class="modal-body">
+        <!-- GitHub Token Section -->
+        <div class="form-group">
+          <label class="form-label" for="ghTokenInput">
+            <span>🔑 GitHub Personal Access Token (PAT)</span>
+            <small>Sporește limita API la 5.000 cereri/oră & permite Star direct pe GitHub</small>
+          </label>
+          <input type="password" id="ghTokenInput" class="input-text" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx">
+          <small class="form-help">
+            Generează un token gratuit pe <a href="https://github.com/settings/tokens" target="_blank" rel="noopener">github.com/settings/tokens</a> cu bifa <code>public_repo</code>.
+          </small>
+        </div>
+
+        <!-- Gemini API Key Section -->
+        <div class="form-group">
+          <label class="form-label" for="geminiKeyInput">
+            <span>🤖 Google Gemini API Key (Opțional)</span>
+            <small>Pentru generare rezumat AI "Explain Like I'm 5" super-avansat</small>
+          </label>
+          <input type="password" id="geminiKeyInput" class="input-text" placeholder="AIzaSyXXXXXXXXXXXXXXXX">
+          <small class="form-help">
+            Obține o cheie gratuită Gemini AI pe <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener">aistudio.google.com</a>.
+          </small>
+        </div>
+
+        <div class="modal-actions">
+          <button id="saveSettingsBtn" class="btn-primary-action" style="width: 100%; justify-content: center;">
+            Salvează Setările
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- README Fullscreen Modal -->
+  <div id="readmeModalOverlay" class="modal-overlay full-modal">
+    <div class="modal-card readme-modal-card">
+      <div class="drawer-header">
+        <h2 id="readmeRepoTitle" class="drawer-title">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
+            <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path>
+          </svg>
+          README.md
+        </h2>
+        <button id="closeReadmeBtn" class="btn-close" aria-label="Închide README">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+      </div>
+
+      <div id="readmeContent" class="readme-body">
+        <!-- Rendered markdown content injected here -->
+      </div>
+    </div>
+  </div>
+
   <!-- Toast Notification Container -->
   <div id="toastContainer" class="toast-container" aria-live="assertive"></div>
 
   <!-- Footer -->
   <footer class="app-footer">
-    <p>GitStellar PWA &bull; Conectat direct la API-ul oficial GitHub</p>
+    <p>GitStellar PWA &bull; Conectat direct la API-ul oficial GitHub & Gemini AI</p>
   </footer>
 
   <!-- Application Logic -->
