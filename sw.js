@@ -1,4 +1,4 @@
-const CACHE_NAME = 'gitstellar-v1';
+const CACHE_NAME = 'gitstellar-v2';
 const ASSETS_TO_CACHE = [
   './',
   './index.html',
