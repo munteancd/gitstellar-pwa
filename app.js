@@ -80,6 +80,14 @@ function formatNumber(num) {
   return num.toString();
 }
 
+function escapeHtml(str) {
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 function showToast(message, type = 'info') {
   const toast = document.createElement('div');
   toast.className = 'toast';
@@ -192,63 +200,282 @@ async function fetchRepoReadme(owner, repoName) {
 async function generateAiInsights(repo, readmeText) {
   // If Gemini API Key is provided, use Google Gemini API
   if (state.geminiKey) {
-    try {
-      const prompt = `Analizează acest proiect GitHub și oferă în limba română:
-1) O descriere simplă "Explain Like I'm 5" în maxim o propoziție clară.
-2) 3 motive scurte "De ce să folosești acest proiect?" (bullet points).
+    const prompt = `Ești un mentor pasionat de tehnologie care explică concepte complexe pe înțelesul oricui (ELI5 - Explică-mi ca și cum aș avea 5 ani), în limba română curată și impecabilă.
+
+Analizează acest proiect GitHub (${repo.name}) și creează o explicație amplă, extrem de clară și detaliată, structurată pe 4 secțiuni distincte.
+
+Returnează răspunsul STRICT sub formă de JSON cu următoarea structură:
+
+{
+  "eli5": {
+    "overview": "Explică pe larg (3-4 propoziții) ce este acest proiect, ce face exact și care este scopul lui principal. Folosește termeni simpli și limba română naturală.",
+    "problem": "Explică în detaliu (2-3 propoziții) ce problemă enervantă sau dificilă rezolvă acest proiect și cum era viața oamenilor sau a programatorilor înainte să existe această soluție.",
+    "analogy": "Oferă o analogie intuitivă din viața reală (2-3 propoziții). De exemplu: 'Imaginează-ți că... E ca și cum...' ca să înțeleagă instant un copil de 5 ani sau cineva care nu are nicio legătură cu IT-ul.",
+    "audience": "Explică clar cine sunt utilizatorii acestui proiect (2-3 propoziții) și în ce situații concrete din practică îl folosesc aceștia."
+  },
+  "whyUse": [
+    "Motiv 1 specific, clar și bazat pe valoare reală",
+    "Motiv 2 specific, clar și bazat pe valoare reală",
+    "Motiv 3 specific, clar și bazat pe valoare reală"
+  ]
+}
+
+REGULI OBLIGATORII:
+- Totul în limba română corectă, fără Romglish (dacă e absolut necesar un termen tehnic ca 'server' sau 'database', explică-l pe scurt).
+- FĂRĂ propoziții lipite artificial din engleză. Nu lipi direct descrierea în engleză în mijlocul frazelor în română!
+- Nu folosi jargon de marketing gol ("revoluționar", "starea artei", "next-gen").
+- Fii generos cu detaliile și explicațiile intuitive!
 
 Proiect: ${repo.name}
-Descriere: ${repo.description}
-README extras: ${readmeText.slice(0, 1500)}
+Descriere oficială GitHub: ${repo.description || '(fără descriere)'}
+Limbaj principal: ${repo.language || 'Nespecificat'}
+Etichete (Topics): ${(repo.topics || []).join(', ') || '(fără etichete)'}
+Număr Stele: ${repo.stargazers_count}
+Fragment din README: ${readmeText.slice(0, 4000)}`;
 
-Răspunde STRICT în format JSON:
-{"eli5": "...", "whyUse": ["motiv 1", "motiv 2", "motiv 3"]}`;
+    const models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'];
+    for (const model of models) {
+      try {
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${state.geminiKey.trim()}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: { temperature: 0.7, maxOutputTokens: 1500, responseMimeType: 'application/json' }
+          })
+        });
 
-      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${state.geminiKey.trim()}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
-      });
+        if (!res.ok) continue;
 
-      if (res.ok) {
         const data = await res.json();
         const responseText = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
         const jsonMatch = responseText.match(/\{[\s\S]*\}/);
         if (jsonMatch) {
-          return JSON.parse(jsonMatch[0]);
+          const parsed = JSON.parse(jsonMatch[0]);
+          if (parsed.eli5) {
+            return {
+              eli5: parsed.eli5,
+              whyUse: Array.isArray(parsed.whyUse) && parsed.whyUse.length ? parsed.whyUse : buildFallbackInsights(repo, readmeText).whyUse
+            };
+          }
         }
+      } catch (e) {
+        console.error(`Gemini API Error (${model}), încerc mai departe:`, e);
       }
-    } catch (e) {
-      console.error('Gemini API Error, using smart fallback:', e);
     }
   }
 
-  // --- Smart Offline Fallback Generator ---
-  let cleanDesc = repo.description || 'Un proiect open-source apreciat de comunitate.';
-  let eli5 = `${repo.name} este o aplicație/bibliotecă creată pentru a simplifica ${cleanDesc.toLowerCase().replace(/^(a|an|the)\s+/, '')}.`;
-  
+  return buildFallbackInsights(repo, readmeText);
+}
+
+// --- Categorii pentru explicația offline (fără cheie Gemini) ---
+const ELI5_CATEGORIES = [
+  {
+    keys: ['leetcode', 'interview', 'algorithm', 'coding-challenge', 'competitive-programming', 'data-structures'],
+    overview: (repo) => `${repo.name} este o colecție vastă și bine structurată de probleme de algoritmică și exerciții de programare${repo.language ? ` implementate în ${repo.language}` : ''}. Proiectul adună sute de exerciții practice catalogate pe domenii, niveluri de dificultate și frecvența cu care sunt cerute la interviuri.`,
+    problem: () => `Rezolvă problema pregătirii haotice pentru interviurile tehnice. În loc să cauți la întâmplare exerciții pe tot internetul sau să pierzi ore încercând să înțelegi explicații incomplete, ai un ghid complet de studiu într-un singur loc.`,
+    analogy: () => `Imaginează-ți că te pregătești pentru un examen greu de admitere: în loc să ghicești ce întrebări vor cădea, ai o culegere completă cu toate variantele din anii trecuți și cu rezolvările lor pas cu pas.`,
+    audience: () => `Este utilizat în special de studenți, candidați pentru roluri de programator și ingineri software care vor să obțină un job la companiile IT de top.`
+  },
+  {
+    keys: ['awesome', 'curated', 'resources', 'cheatsheet', 'collection', 'list'],
+    overview: (repo) => `${repo.name} este o bibliotecă centralizată și o colecție selecționată de resurse, ghiduri, articole și instrumente valoroase${repo.language ? ` legate de ${repo.language}` : ''}. Proiectul filtrează zgomotul de pe internet și păstrează doar materialele cu adevărat utile.`,
+    problem: () => `Elimină supraîncărcarea cu informații inutile. Când vrei să înveți un domeniu nou, internetul este plin de tutoriale vechi sau slabe; acest ghid îți oferă scurtătura către cele mai bune resurse verificate.`,
+    analogy: () => `E ca un ghid turistic al unui oraș străin scris de un localnic generos: în loc să intri în localuri proaste la întâmplare, ghidul îți arată exact locurile de nota 10 unde merită să mergi.`,
+    audience: () => `Îl folosesc pasionații de tehnologie, programatorii curioși și profesioniștii care vor să descopere rapid cele mai bune resurse dintr-un domeniu fără risipă de timp.`
+  },
+  {
+    keys: ['machine-learning', 'deep-learning', 'llm', 'neural', 'transformer', 'gpt', 'diffusion', 'artificial-intelligence', 'nlp', 'ai'],
+    overview: (repo) => `${repo.name} este un proiect avansat de inteligență artificială${repo.language ? ` dezvoltat în ${repo.language}` : ''}, capabil să analizeze date complexe, să recunoască tipare sau să genereze conținut inteligent în mod automat.`,
+    problem: () => `Rezolvă sarcini extrem de complexe care ar dura sute de ore de muncă manuală sau care ar necesita calcule imposibil de efectuat de către un om (cum ar fi analizarea a milioane de texte sau imagini).`,
+    analogy: () => `E ca un asistent virtual genial care citește o bibliotecă întreagă în câteva secunde și este capabil să îți sintetizeze răspunsul corect sau să creeze ceva nou la comandă.`,
+    audience: () => `Este utilizat de cercetători, dezvoltatori de aplicații de IA și companii care vor să automatizeze procese de decizie sau să adauge funcționalități inteligente.`
+  },
+  {
+    keys: ['framework', 'library', 'sdk', 'toolkit', 'boilerplate', 'starter'],
+    overview: (repo) => `${repo.name} este un set de blocuri de construcție și piese de cod prefabricate${repo.language ? ` în ${repo.language}` : ''}. Oferă arhitectura de bază necesară pentru ca dezvoltatorii să creeze aplicații noi fără a reconstrui totul de la zero.`,
+    problem: () => `Scapă programatorii de munca repetitivă de a scrie de la zero cod pentru funcționalități de bază (autentificare, conectare la baze de date, gestionarea fișierelor sau navigație).`,
+    analogy: () => `E ca o cutie cu piese Lego gata turnate: în loc să produci tu fiecare piesă din plastic topit, le pui cap la cap pe cele gata făcute și construiești castelul dorit în timp record.`,
+    audience: () => `Îl folosesc echipele de dezvoltare și creatorii de produse software care vor să lanseze aplicații rapid și să mențină o calitate ridicată a codului.`
+  },
+  {
+    keys: ['cli', 'terminal', 'command-line', 'shell', 'bash', 'zsh'],
+    overview: (repo) => `${repo.name} este o unealtă software rapidă care rulează direct în terminal (linia de comandă)${repo.language ? `, realizată în ${repo.language}` : ''}. Permite executarea de acțiuni complexe prin comenzi scurte de text.`,
+    problem: () => `Rezolvă problema interfețelor grafice lente. În loc să navighezi prin zeci de meniuri și să dai click-uri repetate, tastezi o comandă scurtă și treaba se execută instantaneu.`,
+    analogy: () => `E ca o cheie cu telecomandă pentru mașină: în loc să descui manual fiecare portieră pe rând, apeși un buton și totul se deschide dintr-o dată.`,
+    audience: () => `Îl folosesc administratorii de sistem, inginerii DevOps și programatorii care lucrează intensiv la tastatură și vor viteză maximă.`
+  },
+  {
+    keys: ['docker', 'kubernetes', 'devops', 'ci-cd', 'infrastructure', 'self-hosted', 'monitoring', 'deployment'],
+    overview: (repo) => `${repo.name} este un instrument de infrastructură care ambalează, distribuie și rulează aplicații software în medii izolate și sigure.`,
+    problem: () => `Elimină celebra scuză „la mine pe calculator funcționează, dar pe server a crăpat”. Asigură că aplicația rulează identic oriunde este instalată.`,
+    analogy: () => `E ca un container de marfă standardizat: indiferent ce pui în el (electronice, haine, mâncare), navele și camioanele îl pot transporta în siguranță fără să le pese de conținut.`,
+    audience: () => `Îl folosesc inginerii care publică servicii online și vor ca site-urile sau aplicațiile lor să meargă fără întrerupere 24 din 24.`
+  },
+  {
+    keys: ['game', 'gamedev', 'engine', 'godot', 'unity', 'emulator'],
+    overview: (repo) => `${repo.name} este un proiect dedicat creației de jocuri video sau emulării de console de jocuri${repo.language ? ` dezvoltat în ${repo.language}` : ''}. Furnizează mecanicele de bază pentru fizică, grafică și sunet.`,
+    problem: () => `Scapă creatorii de jocuri de necesitatea de a programa manual formule matematice grele pentru gravitație, mișcarea personajelor sau coliziunile dintre obiecte.`,
+    analogy: () => `E ca o scenă de teatru gata echipată cu lumini, decoruri mobile și efecte speciale: regizorul (creatorul de jocuri) trebuie doar să pună actorii în scenă.`,
+    audience: () => `Îl folosesc dezvoltatorii independenți de jocuri, studiourile de gaming și pasionații care vor să retrăiască jocuri clasice pe calculatoare noi.`
+  },
+  {
+    keys: ['database', 'sql', 'orm', 'storage', 'cache', 'postgres', 'redis'],
+    overview: (repo) => `${repo.name} este un sistem specializat pentru stocarea, organizarea și găsirea ultra-rapidă a datelor și informațiilor dintr-o aplicație.`,
+    problem: () => `Rezolvă problema pierderii datelor și a timpului mare de căutare. Când ai mii de utilizatori, găsirea informației potrivite fără o bază de date ar dura minute sau ore.`,
+    analogy: () => `E ca un dulap de arhivă inteligent cu mii de sertare etichetate și un robot super-rapid care îți aduce dosarul cerut într-o fracțiune de secundă.`,
+    audience: () => `Este un pilon central utilizat de aproape orice aplicație web, mobilă sau bancară care trebuie să păstreze datele în siguranță.`
+  },
+  {
+    keys: ['security', 'pentest', 'vulnerability', 'hacking', 'cryptography', 'privacy', 'firewall'],
+    overview: (repo) => `${repo.name} este o unealtă de securitate cibernetică creată pentru detectarea vulnerabilităților, criptarea datelor sau protejarea sistemelor informatice.`,
+    problem: () => `Previne atacurile cibernetice și scurgerile de date confidențiale. Ajută la descoperirea punctelor slabe dintr-un program înainte ca atacatorii rău intenționați să le poată exploata.`,
+    analogy: () => `E ca un lăcătuș profesionist angajat să încerce să spargă ușa unei case: dacă el reușește să intre, îți spune exact unde trebuie să schimbi yala înainte să vină hoții.`,
+    audience: () => `Îl folosesc specialiștii în securitate IT, hackerii etici și administratorii de rețea care vor să-și protejeze datele utilizatorilor.`
+  },
+  {
+    keys: ['tutorial', 'course', 'learning', 'book', 'guide', 'roadmap', 'education', 'handbook'],
+    overview: (repo) => `${repo.name} este un ghid educațional complet și bine structurat, conceput pentru învățarea pas cu pas a unor concepte fundamentale sau avansate de tehnologie.`,
+    problem: () => `Elimină confuzia începătorilor. În loc să navighezi prin sute de articole împrăștiate și contradictorii, ai un traseu clar de învățare, de la simplu la complex.`,
+    analogy: () => `E ca o hartă de drumeție pe munte cu traseul marcat: știi exact unde începe drumul, unde sunt locurile de odihnă și cum ajungi în siguranță în vârf.`,
+    audience: () => `Îl folosesc persoanele care învață autonom, studenții și profesorii care caută un suport de curs de calitate.`
+  },
+  {
+    keys: ['api', 'rest', 'graphql', 'backend', 'http', 'server', 'microservice'],
+    overview: (repo) => `${repo.name} este o interfață de comunicare sau o aplicație de backend${repo.language ? ` scrisă în ${repo.language}` : ''} care permite conectarea și schimbul de date între diferite sisteme.`,
+    problem: () => `Rezolvă problema izolării programelor. Permite ca o aplicație de pe telefon și un server din alt colț al lumii să vorbească între ele instantaneu.`,
+    analogy: () => `E ca un chelner într-un restaurant: preia comanda de la masa ta, o duce în bucătărie și vine înapoi cu mâncarea. Tu nu trebuie să intri în bucătărie deloc.`,
+    audience: () => `Îl folosesc programatorii de backend și inginerii care construiesc servicii interconectate pe internet.`
+  },
+  {
+    keys: ['ui', 'css', 'design', 'frontend', 'react', 'vue', 'svelte', 'component', 'tailwind', 'animation'],
+    overview: (repo) => `${repo.name} este o colecție de elemente vizuale de interfață, stiluri și componente grafice${repo.language ? ` pentru ${repo.language}` : ''} destinate creării de site-uri și aplicații arătoase.`,
+    problem: () => `Economisește sute de ore de muncă vizuală. Scapă dezvoltatorii web de necesitatea de a desena și programa manual fiecare buton, meniu sau animație.`,
+    analogy: () => `E ca un set de piese de mobilier gata croite: le așezi în cameră și arată impecabil din prima zi, fără să dai tu cu ciocanul sau cu vopseaua.`,
+    audience: () => `Îl folosesc designerii web și dezvoltatorii frontend care vor să creeze interfețe moderne, responsive și atractive.`
+  },
+  {
+    keys: ['bot', 'automation', 'scraper', 'crawler', 'workflow', 'scheduler'],
+    overview: (repo) => `${repo.name} este un robot software conceput pentru automatizarea sarcinilor repetitive, colectarea de date de pe internet sau executarea de fluxuri automate.`,
+    problem: () => `Elimină munca manuală obositoare (cum ar fi copierea și lipirea de date, descărcarea de fișiere sau trimiterea de e-mailuri) care consumă timp și aduce greșeli.`,
+    analogy: () => `E ca un ajutor de nădejde care face aceeași treabă plictisitoare de o mie de ori fără să obosească, fără să facă pauze și fără să greșească.`,
+    audience: () => `Îl folosesc analiștii de date, antreprenorii și oricine vrea să lase treburile de rutină pe seama calculatorului.`
+  },
+  {
+    keys: ['mobile', 'android', 'ios', 'flutter', 'react-native', 'kotlin', 'swift'],
+    overview: (repo) => `${repo.name} este o soluție software dedicată dezvoltării de aplicații pentru telefoane inteligente și tablete${repo.language ? ` construite în ${repo.language}` : ''}.`,
+    problem: () => `Rezolvă provocarea de a crea aplicații rapide și fluide pe ecrane de dimensiuni diferite și pe sisteme de operare distincte (precum Android și iOS).`,
+    analogy: () => `E ca un tipar inteligent de croitorie: ajustează hainele automat astfel încât să vină perfect pe oricine, indiferent de înălțime sau conformație.`,
+    audience: () => `Îl folosesc dezvoltatorii de aplicații mobile care vor să ofere o experiență impecabilă utilizatorilor pe smartphone.`
+  }
+];
+
+function pickEli5Category(repo, readmeText) {
+  const haystack = [
+    repo.name,
+    repo.description || '',
+    (repo.topics || []).join(' '),
+    readmeText.slice(0, 1500)
+  ].join(' ').toLowerCase();
+
+  let best = null;
+  let bestScore = 0;
+  for (const cat of ELI5_CATEGORIES) {
+    const score = cat.keys.reduce((acc, k) => acc + (haystack.includes(k) ? 1 : 0), 0);
+    if (score > bestScore) {
+      bestScore = score;
+      best = cat;
+    }
+  }
+  return best || {
+    overview: (r) => `${r.name} este un proiect open-source apreciat${r.language ? `, creat în principal în ${r.language}` : ''}, al cărui cod este public și pus gratuit la dispoziția tuturor.`,
+    problem: () => `Rezolvă problema reinventării roții în programare: oferă o soluție deja testată și finisată pentru a economisi timpul comunității.`,
+    analogy: () => `E ca o rețetă culinară publicată pe internet: oricine o poate citi, o poate găti acasă și îi poate adăuga propriile condimente pentru a o face și mai bună.`,
+    audience: () => `Îl folosesc programatorii și pasionații din întreaga lume care caută o bază solidă pentru proiectele lor.`
+  };
+}
+
+function popularityPhrase(stars) {
+  if (stars >= 50000) return 'e printre cele mai cunoscute proiecte de pe GitHub la nivel mondial';
+  if (stars >= 10000) return 'foarte multă lume îl folosește deja zi de zi';
+  if (stars >= 1000) return 's-a strâns o comunitate serioasă în jurul lui';
+  return 'e apreciat de un grup dedicat de utilizatori';
+}
+
+// --- Smart Offline Fallback Generator ---
+function buildFallbackInsights(repo, readmeText = '') {
+  const cat = pickEli5Category(repo, readmeText);
+  const stars = repo.stargazers_count || 0;
+
+  let overviewText = cat.overview(repo);
+  if (repo.description && repo.description.trim()) {
+    const cleanDesc = repo.description.trim().replace(/\s+/g, ' ').replace(/[.\s]+$/, '');
+    overviewText += ` Autorii îl descriu oficial pe GitHub astfel: „${cleanDesc}”.`;
+  }
+  overviewText += ` Proiectul adună peste ${formatNumber(stars)} de stele pe GitHub, ceea ce înseamnă că ${popularityPhrase(stars)}.`;
+
+  const eli5 = {
+    overview: overviewText,
+    problem: cat.problem(repo),
+    analogy: cat.analogy(repo),
+    audience: cat.audience(repo)
+  };
+
   const whyUse = [];
-  if (repo.stargazers_count > 5000) {
-    whyUse.push(`Proiect de încredere masivă cu peste ${formatNumber(repo.stargazers_count)} de stele pe GitHub.`);
+  if (stars > 5000) {
+    whyUse.push(`Proiect extrem de popular și de încredere, susținut de peste ${formatNumber(stars)} de stele pe GitHub.`);
   } else {
-    whyUse.push(`Popular în comunitatea de ${repo.language || 'developers'} (${formatNumber(repo.stargazers_count)} stele).`);
+    whyUse.push(`Apreciat de comunitatea de ${repo.language || 'dezvoltatori'} cu peste ${formatNumber(stars)} de stele.`);
   }
 
   if (readmeText.toLowerCase().includes('fast') || readmeText.toLowerCase().includes('performan')) {
-    whyUse.push('Optimizat pentru performanță ridicată și execuție rapidă.');
+    whyUse.push('Optimizat pentru performanță ridicată, viteză de execuție și utilizare eficientă a resurselor.');
   } else if (readmeText.toLowerCase().includes('easy') || readmeText.toLowerCase().includes('simple')) {
-    whyUse.push('Ușor de integrat și configurat în orice proiect.');
+    whyUse.push('Conceput pentru a fi ușor de instalat, configurat și integrat în proiectele existente.');
   } else {
-    whyUse.push('Economisește timp de dezvoltare prin funcționalitățile pregătite din fabrică.');
+    whyUse.push('Economisește timp prețios de dezvoltare prin furnizarea de funcționalități gata pregătite.');
   }
 
   if (repo.license) {
-    whyUse.push(`Licențiat Open-Source (${repo.license.name || repo.license.spdx_id}).`);
+    whyUse.push(`Licențiat oficial Open-Source (${repo.license.name || repo.license.spdx_id || 'Sursă Deschisă'}).`);
   } else {
-    whyUse.push('Activ menținut și susținut de comunitate.');
+    whyUse.push('Proiect deschis, menținut activ de către comunitate.');
   }
 
   return { eli5, whyUse };
+}
+
+// --- Normalize ELI5 to 4-Part Structure ---
+function normalizeEli5(rawEli5, repo, readmeText) {
+  if (rawEli5 && typeof rawEli5 === 'object' && rawEli5.overview) {
+    return {
+      overview: rawEli5.overview || '',
+      problem: rawEli5.problem || '',
+      analogy: rawEli5.analogy || '',
+      audience: rawEli5.audience || ''
+    };
+  }
+
+  if (typeof rawEli5 === 'string' && rawEli5.trim()) {
+    const paragraphs = rawEli5.split(/\n\n+/).filter(p => p.trim());
+    if (paragraphs.length >= 4) {
+      return {
+        overview: paragraphs[0],
+        problem: paragraphs[1],
+        analogy: paragraphs[2],
+        audience: paragraphs.slice(3).join(' ')
+      };
+    }
+    const fallback = buildFallbackInsights(repo, readmeText).eli5;
+    return {
+      overview: rawEli5,
+      problem: fallback.problem,
+      analogy: fallback.analogy,
+      audience: fallback.audience
+    };
+  }
+
+  return buildFallbackInsights(repo, readmeText).eli5;
 }
 
 // --- Render Repository Card ---
@@ -266,8 +493,9 @@ async function renderRepoCard(repo) {
   const readmeText = await fetchRepoReadme(repo.owner.login, repo.name);
   state.currentReadmeText = readmeText;
 
-  // Generate AI Insights
+  // Generate AI Insights & normalize ELI5
   const aiInsights = await generateAiInsights(repo, readmeText);
+  const eli5Obj = normalizeEli5(aiInsights.eli5, repo, readmeText);
 
   repoCard.innerHTML = `
     <div class="repo-header">
@@ -296,18 +524,52 @@ async function renderRepoCard(repo) {
     <div class="ai-insights-box">
       <div class="ai-header">
         <span class="ai-title-badge">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>
-          🤖 AI Summary (ELI5)
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>
+          🤖 AI Summary & Explicație Detaliată (ELI5)
         </span>
-        ${state.geminiKey ? '<small style="color:#c084fc; font-size:0.75rem;">Powered by Gemini</small>' : ''}
+        ${state.geminiKey ? '<span class="ai-powered-tag">Powered by Gemini AI</span>' : '<span class="ai-offline-tag">Mod Inteligent Offline</span>'}
       </div>
 
-      <p class="ai-eli5-text">"${aiInsights.eli5}"</p>
+      <div class="ai-eli5-grid">
+        <div class="eli5-card eli5-overview">
+          <div class="eli5-card-header">
+            <span class="eli5-icon">🎯</span>
+            <strong>Ce este proiectul?</strong>
+          </div>
+          <p>${escapeHtml(eli5Obj.overview)}</p>
+        </div>
 
-      <div class="ai-why-title">De ce să folosești ${repo.name}?</div>
-      <ul class="ai-why-list">
-        ${aiInsights.whyUse.map(reason => `<li>${reason}</li>`).join('')}
-      </ul>
+        <div class="eli5-card eli5-problem">
+          <div class="eli5-card-header">
+            <span class="eli5-icon">⚡</span>
+            <strong>Ce problemă rezolvă?</strong>
+          </div>
+          <p>${escapeHtml(eli5Obj.problem)}</p>
+        </div>
+
+        <div class="eli5-card eli5-analogy">
+          <div class="eli5-card-header">
+            <span class="eli5-icon">💡</span>
+            <strong>Analogie din viața reală</strong>
+          </div>
+          <p>${escapeHtml(eli5Obj.analogy)}</p>
+        </div>
+
+        <div class="eli5-card eli5-audience">
+          <div class="eli5-card-header">
+            <span class="eli5-icon">🚀</span>
+            <strong>Cui îi folosește?</strong>
+          </div>
+          <p>${escapeHtml(eli5Obj.audience)}</p>
+        </div>
+      </div>
+
+      <div class="ai-why-section">
+        <div class="ai-why-title">De ce să folosești ${escapeHtml(repo.name)}?</div>
+        <ul class="ai-why-list">
+          ${aiInsights.whyUse.map(reason => `<li>${escapeHtml(reason)}</li>`).join('')}
+        </ul>
+      </div>
     </div>
 
     <div class="repo-topics">
