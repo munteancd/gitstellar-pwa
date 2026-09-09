@@ -1,5 +1,7 @@
 # 🌟 GitStellar - Random GitHub Repos PWA
 
+**🔗 Live: https://munteancd.github.io/gitstellar-pwa/**
+
 **GitStellar** este o aplicație Progressive Web App (PWA) modernă și ultra-rapidă care te ajută să descoperi repozitorii GitHub populare și fascinante cu cel puțin 100 de stele (sau configurat după preferințe).
 
 ![GitStellar Banner](icon.svg)
