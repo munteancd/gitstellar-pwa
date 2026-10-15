@@ -196,215 +196,400 @@ async function fetchRepoReadme(owner, repoName) {
   return '';
 }
 
-// --- Smart AI Insights Generator (Gemini + Smart Fallback) ---
-async function generateAiInsights(repo, readmeText) {
-  // If Gemini API Key is provided, use Google Gemini API
-  if (state.geminiKey) {
-    const prompt = `Ești un mentor pasionat de tehnologie care explică concepte complexe pe înțelesul oricui (ELI5 - Explică-mi ca și cum aș avea 5 ani), în limba română curată și impecabilă.
+// --- Repo Insights: Gemini explains, README-only fallback never invents ---
+const GEMINI_MODELS = ['gemini-3.5-flash', 'gemini-flash-latest', 'gemini-2.5-flash', 'gemini-flash-lite-latest'];
 
-Analizează acest proiect GitHub (${repo.name}) și creează o explicație amplă, extrem de clară și detaliată, structurată pe 4 secțiuni distincte.
-
-OBLIGATORIU: FIECARE DINTRE CELE 4 SECȚIUNI TREBUIE SĂ ADUCĂ INFORMAȚIE NOUĂ ȘI SPECIFICĂ DESPRE PROIECTUL "${repo.name}". NU REPETA ACELEAȘI IDEI, DESCRIERI SAU FRAZE ÎN CASETE DIFERITE!
-
-Returnează răspunsul STRICT sub formă de JSON cu următoarea structură:
-
-{
-  "eli5": {
-    "overview": "Ce este proiectul (3-4 propoziții): Arhitectura, ce este din punct de vedere tehnic (bibliotecă, aplicație, colecție de resurse) și ce funcție principală îndeplinește.",
-    "problem": "Ce problemă rezolvă (2-3 propoziții): Fii SPECIFIC la acest proiect! Ce treabă manuală, enervantă, scumpă sau grea trebuiau să facă oamenii înainte să existe ${repo.name}? NU repeta definiția din 'Ce este'!",
-    "analogy": "Analogie din viața reală (2-3 propoziții): O metaforă vizuală UNICĂ din lumea de zi cu zi (fără jargon IT) care explică cum funcționează conceptul central din ${repo.name}.",
-    "audience": "Cui îi folosește (2-3 propoziții): Cine sunt utilizatorii concreți (programatori de ${repo.language || 'un anumit tip'}, echipe de producție, studenți, etc.) și în ce momente sau proiecte specifice îl folosesc."
+const GEMINI_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    summary: { type: 'STRING' },
+    example: { type: 'STRING' },
+    command: { type: 'STRING' },
+    steps: { type: 'STRING' },
+    worthIf: { type: 'STRING' },
+    skipIf: { type: 'STRING' }
   },
-  "whyUse": [
-    "Motiv 1 specific bazat pe valoare reală",
-    "Motiv 2 specific bazat pe valoare reală",
-    "Motiv 3 specific bazat pe valoare reală"
-  ]
+  required: ['summary', 'example', 'command', 'steps', 'worthIf', 'skipIf'],
+  propertyOrdering: ['summary', 'example', 'command', 'steps', 'worthIf', 'skipIf']
+};
+
+const CARD_DEFS = [
+  { key: 'summary', icon: '🎯', title: 'Pe scurt' },
+  { key: 'example', icon: '🧪', title: 'Exemplu' },
+  { key: 'tryIt', icon: '▶️', title: 'Cum îl încerci' },
+  { key: 'worthIf', icon: '⚖️', title: 'Merită dacă…' }
+];
+
+const readmeCache = new Map();
+const aiCache = new Map();
+const aiPending = new Map();
+
+function cacheSet(map, key, value) {
+  map.set(key, value);
+  if (map.size > 50) map.delete(map.keys().next().value);
 }
 
-REGULI ANTI-REPETIȚIE ȘI LIMBĂ:
-- Fără formulări generice care s-ar potrivi la orice proiect. Folosește detaliile specifice din descriere și README!
-- Fără Romglish și fără lipit direct de fraze brute în engleză din descriere.
-- Nu repeta aceleași cuvinte sau concepte între 'overview', 'problem', 'analogy' și 'audience'.
+// Strip badges, images, HTML and link URLs outside code blocks, so only readable text and code remain
+function cleanReadme(md) {
+  return String(md || '')
+    .split(/((?:```|~~~)[\s\S]*?(?:```|~~~))/)
+    .map((part, i) => i % 2 ? part : part
+      .replace(/<!--[\s\S]*?-->/g, '')
+      .replace(/\[!\[[^\]]*\]\([^)]*\)\]\([^)]*\)/g, '')
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/^\s*\[[^\]]+\]:\s*\S+.*$/gm, '')
+      .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+      .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'"))
+    .join('')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
 
-Proiect: ${repo.name}
-Descriere oficială GitHub: ${repo.description || '(fără descriere)'}
-Limbaj principal: ${repo.language || 'Nespecificat'}
-Etichete (Topics): ${(repo.topics || []).join(', ') || '(fără etichete)'}
-Număr Stele: ${repo.stargazers_count}
-Fragment din README: ${readmeText.slice(0, 4000)}`;
+function plainText(s) {
+  return String(s || '').replace(/\*\*|__|`/g, '').replace(/\s+/g, ' ').trim();
+}
 
-    const models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'];
-    for (const model of models) {
-      try {
-        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${state.geminiKey.trim()}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }],
-            generationConfig: { temperature: 0.7, maxOutputTokens: 1500, responseMimeType: 'application/json' }
-          })
-        });
+function truncateText(s, max) {
+  if (s.length <= max) return s;
+  const cut = s.slice(0, max);
+  const sentenceEnd = cut.lastIndexOf('. ');
+  return (sentenceEnd > max * 0.5 ? cut.slice(0, sentenceEnd + 1) : cut.replace(/\s+\S*$/, '') + '…');
+}
 
-        if (!res.ok) continue;
+// Split a README into paragraphs, lists and code blocks, each tagged with the heading above it
+function parseReadme(md) {
+  const blocks = [];
+  const headingPath = [];
+  let heading = '';
+  let fence = null;
+  let code = [];
+  let para = [];
+  let list = [];
+  const flushPara = () => { if (para.length) blocks.push({ type: 'para', text: plainText(para.join(' ')), heading }); para = []; };
+  const flushList = () => { if (list.length) blocks.push({ type: 'list', items: list.map(i => plainText(i.split(' | ')[0])), heading }); list = []; };
 
-        const data = await res.json();
-        const responseText = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-        const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          const parsed = JSON.parse(jsonMatch[0]);
-          if (parsed.eli5) {
-            return {
-              eli5: parsed.eli5,
-              whyUse: Array.isArray(parsed.whyUse) && parsed.whyUse.length ? parsed.whyUse : buildFallbackInsights(repo, readmeText).whyUse
-            };
-          }
-        }
-      } catch (e) {
-        console.error(`Gemini API Error (${model}), încerc mai departe:`, e);
+  for (const line of cleanReadme(md).split('\n')) {
+    const t = line.trim();
+    if (fence) {
+      if (t.startsWith(fence)) {
+        blocks.push({ type: 'code', code: code.join('\n').replace(/^\n+|\s+$/g, ''), heading });
+        fence = null;
+        code = [];
+      } else {
+        code.push(line);
       }
+      continue;
+    }
+    const fenceMatch = t.match(/^(```|~~~)/);
+    const headingMatch = t.match(/^#{1,6}\s+(.*)$/);
+    const listMatch = t.match(/^(?:[-*+]|\d+[.)])\s+(.*)$/);
+    if (fenceMatch) { flushPara(); flushList(); fence = fenceMatch[1]; continue; }
+    if (headingMatch) {
+      flushPara();
+      flushList();
+      const level = t.match(/^#+/)[0].length;
+      headingPath.length = level - 1;
+      headingPath[level - 1] = plainText(headingMatch[1]).toLowerCase();
+      heading = headingPath.filter(Boolean).join(' > ');
+      continue;
+    }
+    if (/^(=+|-+)$/.test(t) && para.length) { heading = plainText(para.pop()).toLowerCase(); flushPara(); continue; }
+    if (/^([-*_]\s*){3,}$/.test(t)) { flushPara(); flushList(); continue; }
+    if (listMatch) { flushPara(); list.push(listMatch[1]); continue; }
+    if (!t || t.startsWith('|')) { flushPara(); flushList(); continue; }
+    flushList();
+    para.push(t.replace(/^>\s*/, ''));
+  }
+  flushPara();
+  flushList();
+  return blocks;
+}
+
+const SKIP_HEADINGS = /licen|contribut|sponsor|backer|star history|contents|cuprins|changelog|acknowledg|credits|citation|faq|integration|community|ecosystem|related|alternative|who uses|used by|showcase|built with|libraries|bindings|translation|press|talks|articles|videos/;
+const PROMO_RE = /sponsor|donat|t-shirt|merch|sticker|star us|buy me|patreon|discord|join our|follow us|newsletter|subscribe|follow me|check out my/i;
+const INSTALL_HEADINGS = /install|get(ting)?[ -]started|quick ?start|setup|download|usage|run/;
+const USAGE_HEADINGS = /usage|example|quick ?start|get(ting)?[ -]started|demo|how to use|basic|tutorial|hello/;
+const INSTALL_RE = /^(npm (i|install)|npx |pnpm (add|dlx|i)|yarn (add|global|dlx)|bun (add|x|i)|bunx |pip3? install|(python3?|py) -m pip install|pipx install|uv (tool|pip) install|uvx |cargo (install|add)|go (install|get)|brew install|docker (run|pull|compose)|winget install|choco install|scoop install|gem install|composer (require|global)|dotnet (tool|add)|(sudo )?apt(-get)? install|curl .*\|\s*(sudo )?(ba)?sh|wget .*\|\s*(ba)?sh|iwr .*\|\s*iex|irm .*\|\s*iex|git clone )/;
+
+function stripShellPrompt(line) {
+  return line.trim().replace(/^(\$|>|PS>|PS [^>]*>)\s*/, '');
+}
+
+function pickIntro(blocks) {
+  const para = blocks.find(b => b.type === 'para'
+    && !SKIP_HEADINGS.test(b.heading)
+    && b.text.length >= 60
+    && b.text.split(' ').length >= 8
+    && (/[.。]/.test(b.text) || b.text.length >= 100)
+    && !PROMO_RE.test(b.text)
+    && (b.text.match(/\p{L}/gu) || []).length > b.text.length * 0.6);
+  return para ? truncateText(para.text, 420) : '';
+}
+
+function pickFeatures(blocks) {
+  const isUseful = b => b.type === 'list' && b.items.length >= 3 && !SKIP_HEADINGS.test(b.heading)
+    && b.items.filter(i => i.split(' ').length > 3).length >= b.items.length * 0.6;
+  const list = blocks.find(b => isUseful(b) && /feature|highlight|why|what|capabilit|key|benefit|overview/.test(b.heading))
+    || blocks.find(isUseful);
+  return list ? list.items.slice(0, 5).map(i => truncateText(i, 160)) : [];
+}
+
+function pickInstall(blocks) {
+  const codeBlocks = blocks.filter(b => b.type === 'code');
+  const ordered = [...codeBlocks.filter(b => INSTALL_HEADINGS.test(b.heading)), ...codeBlocks];
+  for (const block of ordered) {
+    for (const line of block.code.split('\n')) {
+      const cmd = stripShellPrompt(line);
+      if (INSTALL_RE.test(cmd)) return cmd;
     }
   }
-
-  return buildFallbackInsights(repo, readmeText);
+  return '';
 }
 
-function popularityPhrase(stars) {
-  if (stars >= 50000) return 'printre cele mai cunoscute proiecte de pe GitHub la nivel mondial';
-  if (stars >= 10000) return 'un proiect foarte popular, folosit zi de zi de o comunitate uriașă';
-  if (stars >= 1000) return 'un proiect apreciat, cu o comunitate serioasă în jurul lui';
-  return 'un proiect nișat, dar apreciat de utilizatorii săi';
+function pickUsage(blocks) {
+  const block = blocks.find(b => b.type === 'code' && USAGE_HEADINGS.test(b.heading) && b.code.trim().length >= 12
+    && !b.code.split('\n').filter(l => l.trim() && !/^(#|\/\/)/.test(l.trim())).every(l => INSTALL_RE.test(stripShellPrompt(l))));
+  if (!block) return '';
+  const lines = block.code.split('\n');
+  return lines.length > 14 ? lines.slice(0, 14).join('\n') + '\n…' : block.code;
 }
 
-// --- Smart Offline Fallback Generator (100% Dynamic & Unique per Repo) ---
-function buildFallbackInsights(repo, readmeText = '') {
-  const name = repo.name || 'Proiectul';
-  const lang = repo.language || '';
-  const desc = (repo.description || '').trim();
-  const cleanDesc = desc ? desc.replace(/\s+/g, ' ').replace(/[.\s]+$/, '') : '';
-  const topics = repo.topics || [];
-  const topicsStr = topics.length ? topics.slice(0, 4).join(', ') : '';
-  const stars = repo.stargazers_count || 0;
-  const owner = repo.owner?.login || 'autor';
-  const descLower = (desc + ' ' + (topics.join(' ')) + ' ' + readmeText.slice(0, 1500)).toLowerCase();
+function roCount(n, one, many) {
+  if (n === 1) return one;
+  const de = n >= 20 && (n % 100 === 0 || n % 100 >= 20) ? 'de ' : '';
+  return `${n} ${de}${many}`;
+}
 
-  // 1. OVERVIEW (Ce este proiectul?)
-  let overview = '';
-  if (cleanDesc) {
-    overview = `${name} este un proiect open-source${lang ? ` dezvoltat în ${lang}` : ''}, având ca scop principal: „${cleanDesc}”.`;
-  } else {
-    overview = `${name} este o resursă software open-source${lang ? ` creată în ${lang}` : ''}${topicsStr ? ` axată pe ${topicsStr}` : ''}.`;
-  }
-  if (topicsStr) {
-    overview += ` În comunitatea GitHub, proiectul este încadrat în domeniile: #${topics.slice(0, 4).join(', #')}.`;
-  }
-  overview += ` Are peste ${formatNumber(stars)} de stele, fiind ${popularityPhrase(stars)}.`;
+function timeAgoRo(dateStr) {
+  const days = Math.floor((Date.now() - new Date(dateStr).getTime()) / 86400000);
+  if (days < 1) return 'azi';
+  if (days < 30) return `acum ${roCount(days, 'o zi', 'zile')}`;
+  const months = Math.floor(days / 30.44);
+  if (months < 12) return `acum ${roCount(months, 'o lună', 'luni')}`;
+  return `acum ${roCount(Math.floor(days / 365.25), 'un an', 'ani')}`;
+}
 
-  // 2. PROBLEM (Ce problemă rezolvă? - Dinamic după specificul proiectului)
-  let problem = '';
-  if (descLower.includes('leetcode') || descLower.includes('interview') || descLower.includes('companywise') || descLower.includes('coding-challenge')) {
-    problem = `Fără ${name}, candidații care se pregătesc de interviuri tehnice la companii mari pierd zeci de ore căutând haotic exerciții pe forumuri. Proiectul rezolvă această problemă organizând și filtrând problemele reale după companii și frecvență.`;
-  } else if (descLower.includes('awesome') || descLower.includes('curated') || descLower.includes('list') || descLower.includes('cheatsheet')) {
-    problem = `Când vrei să studiezi un domeniu nou${topics.length ? ` precum ${topics[0]}` : ''}, internetul este plin de tutoriale vechi sau de proastă calitate. ${name} elimină informația inutilă și oferă o listă selecționată de resurse verificate.`;
-  } else if (descLower.includes('machine learning') || descLower.includes('llm') || descLower.includes('ai') || descLower.includes('model') || descLower.includes('gpt')) {
-    problem = `Construirea de la zero a modelelor inteligente necesită infrastructură scumpă și calcule matematice grele. ${name} oferă instrumentele necesare pentru a integra inteligența artificială fără a relua totul de la zero.`;
-  } else if (descLower.includes('cli') || descLower.includes('terminal') || descLower.includes('command') || descLower.includes('shell')) {
-    problem = `Navigarea prin interfețe grafice lente sau executarea manuală a mai multor pași în calculator consumă timp. ${name} permite rularea sarcinilor direct din terminal prin comenzi rapide de tastatură.`;
-  } else if (descLower.includes('ui') || descLower.includes('css') || descLower.includes('component') || descLower.includes('theme') || descLower.includes('style')) {
-    problem = `Proiectarea manuală a elementelor vizuale și stilurilor pentru aplicații${lang ? ` în ${lang}` : ''} necesită ore de muncă repetitivă. ${name} oferă componente grafice gata stilizate și pregătite de integrare.`;
-  } else if (descLower.includes('bot') || descLower.includes('scrape') || descLower.includes('automat') || descLower.includes('workflow')) {
-    problem = `Executarea manuală a sarcinilor de rutină (descărcat fișiere, extras date, trimis notificări) este obositoare. ${name} pune aceste activități pe pilot automat.`;
-  } else if (descLower.includes('database') || descLower.includes('sql') || descLower.includes('storage') || descLower.includes('cache')) {
-    problem = `Gestionarea și găsirea rapidă a datelor dintr-o aplicație fără un sistem specializat ar duce la pierderi de informații și la timpi mari de așteptare. ${name} asigură o stocare structurată și rapidă.`;
-  } else {
-    problem = `Fără o unealtă precum ${name}, dezvoltatorii care lucrează cu ${lang || 'această tehnologie'} ar fi nevoiți să scrie manual cod complex pentru ${cleanDesc ? `„${cleanDesc.slice(0, 70)}...”` : 'funcționalitățile dorite'}, pierzând timp prețios.`;
+function repoFacts(repo) {
+  const facts = [];
+  if (repo.archived) facts.push('Arhivat de autor: nu mai primește modificări.');
+  if (repo.pushed_at) {
+    const old = Date.now() - new Date(repo.pushed_at).getTime() > 2 * 365 * 86400000;
+    facts.push(`Ultima modificare: ${timeAgoRo(repo.pushed_at)}${old ? ' (posibil abandonat)' : ''}.`);
+  }
+  const license = repo.license && repo.license.spdx_id !== 'NOASSERTION' ? repo.license.spdx_id : (repo.license?.name || '');
+  facts.push(license ? `Licență: ${license}.` : 'Licență: nedeclarată.');
+  facts.push(`${formatNumber(repo.stargazers_count)} stele, ${formatNumber(repo.open_issues_count)} probleme raportate încă deschise.`);
+  return facts;
+}
+
+// Offline cards: only what the README actually says, untranslated
+function buildReadmeInsights(repo, readmeText) {
+  const worthIf = [
+    { type: 'text', value: 'Fără AI nu pot judeca pentru tine. Câteva fapte care ajută:' },
+    { type: 'list', value: repoFacts(repo) }
+  ];
+  if (!readmeText.trim()) {
+    const none = [{ type: 'text', value: 'Proiectul nu are README, deci nu am de unde lua informații.' }];
+    return { source: 'readme', cards: { summary: none, example: none, tryIt: none, worthIf } };
   }
 
-  // 3. ANALOGY (Analogie din viața reală - Dinamică după domeniu)
-  let analogy = '';
-  if (descLower.includes('leetcode') || descLower.includes('interview')) {
-    analogy = `E ca o culegere cu exercițiile extrase de la ultimele examene ale unei facultăți de top: în loc să ghicești ce să înveți, ai lista exactă cu întrebările care se dau cel mai des.`;
-  } else if (descLower.includes('awesome') || descLower.includes('list')) {
-    analogy = `E ca un ghid turistic conceput de un localnic generos: în loc să intri în restaurante slabe la întâmplare, ai o listă scurtă cu cele mai bune locuri din oraș.`;
-  } else if (descLower.includes('cli') || descLower.includes('terminal')) {
-    analogy = `E ca o telecomandă cu butoane rapide: apeși o comandă scurtă și comanzi aparatul instantaneu, fără să te deplasezi până la el.`;
-  } else if (descLower.includes('ui') || descLower.includes('component')) {
-    analogy = `E ca un set de mobilă gata montată: pui dulapul în cameră și arată bine din prima zi, fără să fii nevoit să tai scândurile singur.`;
-  } else if (descLower.includes('bot') || descLower.includes('scrape') || descLower.includes('automat')) {
-    analogy = `E ca un ajutor casnic harnic: face curățenie sau strânge lucrurile de o mie de ori fără să se plângă și fără să obosească.`;
-  } else if (descLower.includes('ai') || descLower.includes('model') || descLower.includes('llm')) {
-    analogy = `E ca un asistent virtual ultradotat care citește mii de pagini în câteva secunde și îți oferă răspunsul sau rezolvarea exactă de care ai nevoie.`;
-  } else if (descLower.includes('database') || descLower.includes('sql') || descLower.includes('storage')) {
-    analogy = `E ca un dulap de arhivă inteligent cu sertare etichetate perfect și un robot care îți aduce dosarul cerut într-o fracțiune de secundă.`;
-  } else {
-    analogy = `Imaginează-ți o cutie de scule profesionistă adaptată special pentru ${name}: în loc să-ți confecționezi singur cheia sau șurubelnița, le iei gata făcute din cutie.`;
-  }
+  const blocks = parseReadme(readmeText);
+  const intro = pickIntro(blocks);
+  const usage = pickUsage(blocks);
+  const features = usage ? [] : pickFeatures(blocks);
+  const install = pickInstall(blocks);
 
-  // 4. AUDIENCE (Cui îi folosește? - Personalizat cu limbajul, etichetele și autorul)
-  let audience = `Proiectul este destinat în principal dezvoltatorilor${lang ? ` care programează în ${lang}` : ''}${topics.length ? ` și celor pasionați de ${topics.slice(0, 2).map(t => '#' + t).join(' și ')}` : ''}.`;
-  audience += ` Este folosit atât de programatori individuali, cât și de echipe care vor să integreze soluția creată de @${owner}.`;
+  const summary = [{ type: 'text', value: intro || 'README-ul nu are un paragraf de prezentare; descrierea scurtă e mai sus.' }];
 
-  const eli5 = {
-    overview,
-    problem,
-    analogy,
-    audience
+  let example;
+  if (usage) example = [{ type: 'code', value: usage }];
+  else if (features.length) example = [{ type: 'text', value: 'Ce scrie README-ul că face:' }, { type: 'list', value: features }];
+  else example = [{ type: 'text', value: 'README-ul nu are un exemplu de folosire.' }];
+
+  let tryIt;
+  if (install) tryIt = [{ type: 'code', value: install }];
+  else if (repo.language) tryIt = [{ type: 'text', value: 'README-ul nu dă o comandă de instalare. Poți descărca codul cu:' }, { type: 'code', value: `git clone ${repo.clone_url}` }];
+  else tryIt = [{ type: 'text', value: 'README-ul nu dă o comandă de instalare și proiectul nu are cod principal, deci pare unul de citit: îl deschizi direct pe GitHub.' }];
+
+  return { source: 'readme', cards: { summary, example, tryIt, worthIf } };
+}
+
+function buildGeminiPrompt(repo, readmeText) {
+  return `Explici unui om curios, care se descurcă cu calculatorul dar nu e programator, ce face concret un proiect de pe GitHub. Scrii în română corectă, cu diacritice, în propoziții scurte. Un termen tehnic îl explici pe românește, în paranteză, prima dată când apare (nu doar desfaci acronimul englezesc).
+
+Regula de bază: fiecare frază trebuie să fie despre ACEST proiect. Dacă o frază s-ar potrivi și la alt proiect („economisește timp", „ușor de folosit", „comunitate mare"), înlocuiește-o cu un detaliu de aici: ce intră, ce iese, ce comenzi, ce fișiere, ce servicii. Fără laude („puternic", „modern", „revoluționar"). Nu inventa: dacă README-ul nu spune ceva, nu scrie.
+
+Câmpuri:
+- summary: 1-2 propoziții. Ce fel de lucru e (aplicație, bibliotecă de cod folosită de alți programatori, unealtă de terminal, extensie, listă de linkuri, carte, curs, colecție de exemple etc.) și ce face.
+- example: un caz concret al folosirii PRINCIPALE (pentru ce l-ar folosi cineva, nu instalarea sau actualizarea lui), scris ca „Tu … → proiectul … → obții …". Folosește nume, comenzi sau fișiere reale din README. Dacă e o listă, o carte sau un curs, exemplul arată ce găsești în el și cum îl folosești.
+- command: prima comandă de instalare sau pornire, copiată EXACT din README, pe o singură linie. Șir gol dacă README-ul nu are una. Nu compune tu comenzi.
+- steps: 1-2 propoziții despre ce faci ca să vezi rezultatul (după comandă, sau de unde începi să citești).
+- worthIf: continuarea frazei „Merită dacă …", concretă, fără să repeți începutul.
+- skipIf: continuarea frazei „Nu merită dacă …", concretă, fără să repeți începutul.
+
+Dacă README-ul e prea sărac ca să știi ce face proiectul, spune asta cinstit în summary în loc să ghicești.
+
+Proiect: ${repo.full_name}
+Descriere GitHub: ${repo.description || '(fără descriere)'}
+Limbaj principal: ${repo.language || 'nespecificat'}
+Etichete: ${(repo.topics || []).join(', ') || '(fără etichete)'}
+README:
+"""
+${cleanReadme(readmeText).slice(0, 8000) || '(fără README)'}
+"""`;
+}
+
+function geminiErrorMessage(status, message = '') {
+  if (/api key/i.test(message)) return 'cheia Gemini nu e validă';
+  if (status === 429) return 'limita gratuită Gemini e atinsă pentru moment';
+  if (status === 500 || status === 503) return 'Gemini e aglomerat acum';
+  if (status === 403) return 'cheia Gemini nu are acces';
+  return `eroare Gemini ${status}`;
+}
+
+function stripVerdictPrefix(s) {
+  return plainText(s).replace(/^(nu\s+)?merit[ăa]\s+dac[ăa]\s*/i, '').replace(/^…\s*/, '');
+}
+
+function capitalize(s) {
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+function aiResultToInsights(data, model, repo, readmeText) {
+  // Keep the command only if it really is in the README; if it isn't an install command, prefer one found there
+  const command = stripShellPrompt(plainText(data.command || ''));
+  const inReadme = command && plainText(readmeText).includes(command) ? command : '';
+  const verified = (INSTALL_RE.test(inReadme) && inReadme) || pickInstall(parseReadme(readmeText)) || inReadme;
+  const tryIt = [];
+  if (verified) tryIt.push({ type: 'code', value: verified });
+  if (plainText(data.steps)) tryIt.push({ type: 'text', value: plainText(data.steps) });
+  if (!tryIt.length) tryIt.push({ type: 'text', value: 'README-ul nu spune cum se pornește.' });
+
+  return {
+    source: 'ai',
+    model,
+    cards: {
+      summary: [{ type: 'text', value: plainText(data.summary) }],
+      example: [{ type: 'text', value: plainText(data.example) }],
+      tryIt,
+      worthIf: [
+        { type: 'text', value: capitalize(stripVerdictPrefix(data.worthIf)) },
+        { type: 'text', value: `Nu merită dacă ${stripVerdictPrefix(data.skipIf)}`, muted: true }
+      ]
+    }
   };
-
-  // WHY USE (Dinamic)
-  const whyUse = [];
-  if (stars > 5000) {
-    whyUse.push(`Comunitate masivă de peste ${formatNumber(stars)} de stele pe GitHub care confirmă utilitatea proiectului.`);
-  } else {
-    whyUse.push(`Popular și apreciat în ecosistemul ${lang || 'open-source'} (${formatNumber(stars)} stele).`);
-  }
-
-  if (cleanDesc) {
-    whyUse.push(`Axat direct pe scopul declarat: „${cleanDesc.slice(0, 85)}${cleanDesc.length > 85 ? '...' : ''}”.`);
-  } else {
-    whyUse.push('Economisește timp prețios de dezvoltare prin furnizarea de funcționalități pregătite din fabrică.');
-  }
-
-  if (repo.license) {
-    whyUse.push(`Licențiat oficial Open-Source (${repo.license.name || repo.license.spdx_id || 'Sursă Deschisă'}).`);
-  } else {
-    whyUse.push('Proiect deschis, menținut și actualizat de comunitate.');
-  }
-
-  return { eli5, whyUse };
 }
 
-// --- Normalize ELI5 to 4-Part Structure ---
-function normalizeEli5(rawEli5, repo, readmeText) {
-  if (rawEli5 && typeof rawEli5 === 'object' && rawEli5.overview) {
-    return {
-      overview: rawEli5.overview || '',
-      problem: rawEli5.problem || '',
-      analogy: rawEli5.analogy || '',
-      audience: rawEli5.audience || ''
-    };
-  }
+async function generateAiInsights(repo, readmeText) {
+  const prompt = buildGeminiPrompt(repo, readmeText);
+  let lastError = 'Gemini n-a răspuns';
 
-  if (typeof rawEli5 === 'string' && rawEli5.trim()) {
-    const paragraphs = rawEli5.split(/\n\n+/).filter(p => p.trim());
-    if (paragraphs.length >= 4) {
-      return {
-        overview: paragraphs[0],
-        problem: paragraphs[1],
-        analogy: paragraphs[2],
-        audience: paragraphs.slice(3).join(' ')
-      };
+  for (const model of GEMINI_MODELS) {
+    try {
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': state.geminiKey.trim() },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: {
+            temperature: 0.4,
+            maxOutputTokens: 4096,
+            responseMimeType: 'application/json',
+            responseSchema: GEMINI_SCHEMA,
+            thinkingConfig: model.startsWith('gemini-2.5') ? { thinkingBudget: 0 } : { thinkingLevel: 'low' }
+          }
+        })
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        lastError = geminiErrorMessage(res.status, data.error?.message);
+        if (lastError === 'cheia Gemini nu e validă') break;
+        continue;
+      }
+
+      const text = (data.candidates?.[0]?.content?.parts || []).filter(p => !p.thought).map(p => p.text || '').join('');
+      const parsed = JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1));
+      if (parsed.summary && parsed.example) {
+        return aiResultToInsights(parsed, data.modelVersion || model, repo, readmeText);
+      }
+      lastError = 'Gemini a dat un răspuns incomplet';
+    } catch (e) {
+      console.error(`Gemini (${model}) a eșuat, încerc următorul model:`, e);
+      lastError = 'Gemini n-a răspuns';
     }
-    const fallback = buildFallbackInsights(repo, readmeText).eli5;
-    return {
-      overview: rawEli5,
-      problem: fallback.problem,
-      analogy: fallback.analogy,
-      audience: fallback.audience
-    };
   }
 
-  return buildFallbackInsights(repo, readmeText).eli5;
+  throw new Error(lastError);
+}
+
+// One request per repo, even if the card re-renders while Gemini is still writing
+function getAiInsights(repo, readmeText) {
+  if (!aiPending.has(repo.id)) {
+    aiPending.set(repo.id, generateAiInsights(repo, readmeText)
+      .then(insights => { cacheSet(aiCache, repo.id, insights); return insights; })
+      .finally(() => aiPending.delete(repo.id)));
+  }
+  return aiPending.get(repo.id);
+}
+
+async function loadAiInsights(repo, readmeText) {
+  let insights;
+  try {
+    insights = await getAiInsights(repo, readmeText);
+  } catch (e) {
+    insights = { ...buildReadmeInsights(repo, readmeText), aiError: e.message };
+  }
+  if (state.currentRepo?.id !== repo.id) return;
+  const box = document.getElementById('aiInsightsBox');
+  if (box) box.innerHTML = renderInsightsBox(insights);
+}
+
+function renderCardParts(parts) {
+  return parts.map(part => {
+    if (part.type === 'code') {
+      return `<div class="card-code"><pre><code>${escapeHtml(part.value)}</code></pre><button type="button" class="code-copy-btn" title="Copiază comanda">Copiază</button></div>`;
+    }
+    if (part.type === 'list') {
+      return `<ul class="card-list">${part.value.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul>`;
+    }
+    return `<p${part.muted ? ' class="muted"' : ''}>${escapeHtml(part.value)}</p>`;
+  }).join('');
+}
+
+function renderInsightsBox(insights) {
+  let tag;
+  let note = '';
+  if (insights.source === 'loading') {
+    tag = '<span class="ai-powered-tag">Gemini citește README-ul…</span>';
+  } else if (insights.source === 'ai') {
+    tag = `<span class="ai-powered-tag" title="${escapeHtml(insights.model)}">Explicat de Gemini</span>`;
+  } else if (insights.aiError) {
+    tag = '<span class="ai-warn-tag">AI indisponibil</span>';
+    note = `Gemini n-a putut răspunde (${escapeHtml(insights.aiError)}), așa că textul de mai jos e luat direct din README, netradus. <button type="button" class="ai-retry-btn" data-action="retry-ai">Reîncearcă</button>`;
+  } else {
+    tag = '<span class="ai-offline-tag">Doar din README</span>';
+    note = 'Fără AI: textul e luat direct din README, netradus. Pentru explicații în română, pune o cheie Gemini gratuită în Setări.';
+  }
+
+  const cardHeader = def => `<div class="eli5-card-header"><span class="eli5-icon">${def.icon}</span><strong>${def.title}</strong></div>`;
+  const cards = CARD_DEFS.map(def => {
+    const body = insights.source === 'loading'
+      ? '<div class="skeleton-box" style="height:14px; width:100%;"></div><div class="skeleton-box" style="height:14px; width:75%;"></div>'
+      : renderCardParts(insights.cards[def.key]);
+    return `<div class="eli5-card">${cardHeader(def)}${body}</div>`;
+  }).join('');
+
+  return `
+    <div class="ai-header">
+      <span class="ai-title-badge">🔍 Ce face, pe înțeles</span>
+      ${tag}
+    </div>
+    ${note ? `<p class="ai-note">${note}</p>` : ''}
+    <div class="ai-eli5-grid">${cards}</div>
+  `;
 }
 
 // --- Render Repository Card ---
@@ -418,13 +603,16 @@ async function renderRepoCard(repo) {
     ? repo.topics.slice(0, 6).map(t => `<span class="topic-tag">#${t}</span>`).join('')
     : '<span class="topic-tag">#open-source</span>';
 
-  // Fetch README for AI Insights and Readme Viewer
-  const readmeText = await fetchRepoReadme(repo.owner.login, repo.name);
+  // README is cached per repo, so re-renders (bookmark, settings) don't refetch it
+  let readmeText = readmeCache.get(repo.id);
+  if (readmeText === undefined) {
+    readmeText = await fetchRepoReadme(repo.owner.login, repo.name);
+    cacheSet(readmeCache, repo.id, readmeText);
+  }
   state.currentReadmeText = readmeText;
 
-  // Generate AI Insights & normalize ELI5
-  const aiInsights = await generateAiInsights(repo, readmeText);
-  const eli5Obj = normalizeEli5(aiInsights.eli5, repo, readmeText);
+  // Show README-only cards right away; with a Gemini key, show a placeholder and fill it when the AI answers
+  const insights = aiCache.get(repo.id) || (state.geminiKey ? { source: 'loading' } : buildReadmeInsights(repo, readmeText));
 
   repoCard.innerHTML = `
     <div class="repo-header">
@@ -446,59 +634,12 @@ async function renderRepoCard(repo) {
     </div>
 
     <p class="repo-description">
-      ${repo.description || 'Nicio descriere disponibilă pentru acest proiect.'}
+      ${escapeHtml(repo.description) || 'Nicio descriere disponibilă pentru acest proiect.'}
     </p>
 
     <!-- AI Insights Box -->
-    <div class="ai-insights-box">
-      <div class="ai-header">
-        <span class="ai-title-badge">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>
-          🤖 AI Summary & Explicație Detaliată (ELI5)
-        </span>
-        ${state.geminiKey ? '<span class="ai-powered-tag">Powered by Gemini AI</span>' : '<span class="ai-offline-tag">Mod Inteligent Offline</span>'}
-      </div>
-
-      <div class="ai-eli5-grid">
-        <div class="eli5-card eli5-overview">
-          <div class="eli5-card-header">
-            <span class="eli5-icon">🎯</span>
-            <strong>Ce este proiectul?</strong>
-          </div>
-          <p>${escapeHtml(eli5Obj.overview)}</p>
-        </div>
-
-        <div class="eli5-card eli5-problem">
-          <div class="eli5-card-header">
-            <span class="eli5-icon">⚡</span>
-            <strong>Ce problemă rezolvă?</strong>
-          </div>
-          <p>${escapeHtml(eli5Obj.problem)}</p>
-        </div>
-
-        <div class="eli5-card eli5-analogy">
-          <div class="eli5-card-header">
-            <span class="eli5-icon">💡</span>
-            <strong>Analogie din viața reală</strong>
-          </div>
-          <p>${escapeHtml(eli5Obj.analogy)}</p>
-        </div>
-
-        <div class="eli5-card eli5-audience">
-          <div class="eli5-card-header">
-            <span class="eli5-icon">🚀</span>
-            <strong>Cui îi folosește?</strong>
-          </div>
-          <p>${escapeHtml(eli5Obj.audience)}</p>
-        </div>
-      </div>
-
-      <div class="ai-why-section">
-        <div class="ai-why-title">De ce să folosești ${escapeHtml(repo.name)}?</div>
-        <ul class="ai-why-list">
-          ${aiInsights.whyUse.map(reason => `<li>${escapeHtml(reason)}</li>`).join('')}
-        </ul>
-      </div>
+    <div class="ai-insights-box" id="aiInsightsBox">
+      ${renderInsightsBox(insights)}
     </div>
 
     <div class="repo-topics">
@@ -564,6 +705,8 @@ async function renderRepoCard(repo) {
   if (starOnGhBtn) {
     starOnGhBtn.addEventListener('click', () => starRepoOnGitHub(repo.owner.login, repo.name));
   }
+
+  if (insights.source === 'loading') loadAiInsights(repo, readmeText);
 }
 
 // --- Live Star on GitHub API ---
@@ -821,10 +964,28 @@ saveSettingsBtn.addEventListener('click', () => {
   localStorage.setItem('gitstellar_gh_token', state.ghToken);
   localStorage.setItem('gitstellar_gemini_key', state.geminiKey);
   
+  aiCache.clear();
   settingsModalOverlay.classList.remove('open');
   showToast('Setările au fost salvate!', 'success');
   fetchGitHubUser();
   if (state.currentRepo) renderRepoCard(state.currentRepo);
+});
+
+// Insights box buttons (the box is re-rendered, so listen on the card)
+repoCard.addEventListener('click', (e) => {
+  const copyBtn = e.target.closest('.code-copy-btn');
+  if (copyBtn) {
+    navigator.clipboard.writeText(copyBtn.previousElementSibling.textContent).then(
+      () => showToast('Comanda a fost copiată în clipboard!', 'success'),
+      () => showToast('Nu am putut copia; selectează comanda și copiaz-o manual.', 'warning')
+    );
+    return;
+  }
+
+  if (e.target.closest('[data-action="retry-ai"]') && state.currentRepo) {
+    document.getElementById('aiInsightsBox').innerHTML = renderInsightsBox({ source: 'loading' });
+    loadAiInsights(state.currentRepo, state.currentReadmeText);
+  }
 });
 
 // Readme Modal Listeners

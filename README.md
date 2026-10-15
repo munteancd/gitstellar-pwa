@@ -9,6 +9,7 @@
 ## ✨ Caracteristici Principale
 
 - 🎲 **Descoperire Aleatorie Inteligentă**: Interoghează API-ul GitHub cu paginare și modificatori aleatori pentru rezultate diverse de fiecare dată.
+- 🔍 **Ce face, pe înțeles**: Gemini citește README-ul și explică în română, pe 4 carduri: *Pe scurt*, *Exemplu*, *Cum îl încerci* (comanda exactă, verificată în README) și *Merită dacă…*. Fără cheie Gemini, cardurile arată direct ce scrie în README, fără să inventeze nimic.
 - 🎯 **Filtre Personalizate**: Filtrează după numărul minim de stele (100+, 500+, 1.000+, 5.000+, 10.000+, 50.000+) și după limbajul de programare (JS, TS, Python, Rust, Go, C++, etc.).
 - 💎 **Interfață Glassmorphism Ultra-Modernă**: Stil dark minimalist cu culori vibrante, efect de sticlă mată și animații fluide.
 - ⭐ **Sistem de Favorite (Bookmarks)**: Salvează repozitoriile preferate local (`localStorage`) și accesează-le oricând.
