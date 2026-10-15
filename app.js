@@ -743,9 +743,10 @@ function openReadmeModal(repo, readmeText) {
   if (!readmeText || readmeText.trim().length === 0) {
     readmeContent.innerHTML = `<p style="color:var(--text-muted); text-align:center; padding:3rem;">Acest repozitoriu nu conține un fișier README.md.</p>`;
   } else {
-    // Parse Markdown using marked.js
-    if (typeof marked !== 'undefined') {
-      readmeContent.innerHTML = marked.parse(readmeText);
+    // Parse Markdown with marked.js, then strip scripts and event handlers: a README can contain any HTML,
+    // and this page keeps the GitHub token and Gemini key in localStorage. Without DOMPurify, show plain text.
+    if (typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined') {
+      readmeContent.innerHTML = DOMPurify.sanitize(marked.parse(readmeText));
     } else {
       readmeContent.textContent = readmeText;
     }
